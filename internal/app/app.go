@@ -150,6 +150,9 @@ func Run() {
 		mux.HandleFunc("/admin/api/cookies/", requireAuth(handleAdminCookieItem))
 		mux.HandleFunc("/admin/api/test", requireAuth(handleAdminTest))
 		mux.HandleFunc("/admin/api/video-quota", requireAuth(handleAdminVideoQuota))
+		// 账号级文本额度（滚动 5 小时 + 每周），读的是网页 /usage 页面自己调的那个 RPC，
+		// 不是本地 requests 表——见 usage_quota.go。
+		mux.HandleFunc("/admin/api/usage-quota", requireAuth(handleAdminUsageQuota))
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
