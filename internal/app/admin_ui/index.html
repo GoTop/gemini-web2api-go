@@ -322,6 +322,21 @@
   .slot-note.danger { color: var(--fail); font-weight: 500; }
   .slot-scroll { max-height: 262px; overflow-y: auto; }
 
+  /* ── 账号额度 ─────────────────────────────────────────────────────────
+     与上面「距离封禁红线」不同：那条轨道量的是本机限流（没打到 Google），
+     这里量的是 Google 账号侧的 compute-based 额度，两条互不相干。
+     百分比由 Google 自己给出，不做二次加工；颜色只表达紧迫程度。 */
+  .qrow { margin-top: 11px; }
+  .qrow:first-of-type { margin-top: 6px; }
+  .qrow-head { display: flex; align-items: baseline; justify-content: space-between;
+               gap: 8px; font-size: 12px; color: var(--muted); }
+  .qrow-head b { color: var(--text); font-size: 13.5px; font-weight: 500;
+                 font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .track .fill.q-ok { background: var(--nav-on-fg); }
+  .track .fill.q-warn { background: var(--warn); }
+  .track .fill.q-bad { background: var(--fail); }
+  .qrow .slot-note { margin-top: 5px; }
+
   /* ── 图表 ───────────────────────────────────────────────────────────── */
   .chart-wrap { position: relative; height: 262px; width: 100%; }
   .chart-wrap canvas { position: absolute; inset: 0; width: 100% !important; height: 100% !important; }
@@ -427,12 +442,76 @@ const fmt = {
 let charts = {};
 const destroyChart = (key) => { if (charts[key]) { charts[key].destroy(); delete charts[key]; } };
 
+// ─── 账号额度 ───────────────────────────────────────────────────────────────
+// 数据来自 /admin/api/usage-quota，源头是网页 /usage 自己调的 batchexecute RPC，
+// 跟「距离封禁红线」量的完全是两回事：那条是本机限流，这条是 Google 账号额度。
+// 百分比由 Google 给出，这里只决定颜色，不重新算。
+
+// 这几个词不放进 I18N_EN：词典同时被 toast 的整串替换逻辑复用，塞太短的 key
+// （「每周」「缓存」）容易在别的句子里误伤。按 LANG 直接出对应语言更安全。
+const quotaPeriodLabel = (p) => {
+  if (p === 'weekly') return LANG === 'en' ? 'Weekly' : '每周';
+  if (p === 'rolling_5h') return LANG === 'en' ? '5 hours' : '5 小时';
+  return p;
+};
+
+const quotaBadge = (cached) =>
+  LANG === 'en' ? (cached ? 'Cached' : 'Live') : (cached ? '缓存' : '实时');
+
+// 重置倒计时。动态拼的字符串过不了 I18N 词典，所以按 LANG 直接出对应语言。
+function quotaResetText(sec) {
+  if (!sec || sec <= 0) return '';
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.max(1, Math.round((sec % 3600) / 60));
+  if (LANG === 'en') {
+    if (d > 0) return `resets in ${d}d ${h}h`;
+    return h > 0 ? `resets in ${h}h ${m}m` : `resets in ${m}m`;
+  }
+  if (d > 0) return `${d} 天 ${h} 小时后重置`;
+  return h > 0 ? `${h} 小时 ${m} 分后重置` : `${m} 分钟后重置`;
+}
+
+function quotaBar(b) {
+  const pct = Math.max(0, Math.min(100, b.percent || 0));
+  const cls = pct >= 90 ? 'q-bad' : (pct >= 70 ? 'q-warn' : 'q-ok');
+  // limit 只有每周桶有，5 小时桶 Google 不给绝对量（limit_known=false），别拿 0 当分母
+  const amt = b.limit_known
+    ? ` · ${fmt.num(Math.round(b.used))} / ${fmt.num(Math.round(b.limit))}`
+    : '';
+  return `<div class="qrow">
+    <div class="qrow-head"><span>${quotaPeriodLabel(b.period)}</span><b>${pct.toFixed(1)}%</b></div>
+    <div class="track"><div class="fill ${cls}" style="width:${pct}%"></div></div>
+    <div class="slot-note">${quotaResetText(b.reset_in_sec)}${amt}</div>
+  </div>`;
+}
+
+function renderQuota(q) {
+  const accts = (q && q.accounts) || [];
+  if (!accts.length) return '<div class="empty">还没有账号</div>';
+  return accts.map(a => {
+    const head = `<div class="slot-head">
+      <span class="slot-name">${escapeHtml(a.label || ('#' + a.id))}</span>
+      <span class="slot-count">${quotaBadge(a.cached)}</span>
+    </div>`;
+    if (a.status !== 'ok') {
+      const msg = a.error || (LANG === 'en' ? 'Query failed' : '查询失败');
+      return `<div class="slot">${head}
+        <div class="slot-note danger">${escapeHtml(msg)}</div></div>`;
+    }
+    return `<div class="slot">${head}${(a.buckets || []).map(quotaBar).join('')}</div>`;
+  }).join('');
+}
+
 // ─── Pages ──────────────────────────────────────────────────────────────────
 
 const pages = {
   dashboard: async () => {
     const stats = await api('api/stats?hours=24');
     const usage = await api('api/usage');
+    // 额度查询失败不该拖垮整个概览页（比如 cookie 失效、上游 RPC 改协议），
+    // 拿不到就渲染成「查询失败」，其余照常显示。
+    const quota = await api('api/usage-quota').catch(() => null);
     return `
       <div class="kpi-row">
         <div class="kpi"><div class="label">24 小时请求</div><div class="value">${fmt.num(stats.total_requests)}</div></div>
@@ -500,6 +579,26 @@ const pages = {
               被拦之后是硬拦（封后 20 分钟内 60 次探测 0 成功），106-121 分钟自动恢复。
               红竖线是本地 RPH 限额的位置，超了直接返回 429 而不去消耗 Google 配额。
               要放大产能就在「代理池」加代理，每个代理是独立 slot。
+            </div>
+          </details>
+        </div>
+
+        <div class="panel">
+          <h2>账号额度
+            <span class="controls"><button onclick="refreshPage()">刷新</button></span>
+          </h2>
+          <div class="slot-scroll">${renderQuota(quota)}</div>
+          <details class="note" style="margin:12px 0 0">
+            <summary>这两个数字是怎么来的</summary>
+            <div class="body">
+              来自 Google 网页端 <code>/usage</code> 页面自己调的那个接口，<b>与网页显示同源</b>，
+              不是本地估算。百分比由 Google 给出，这里不做二次加工。<br><br>
+              <b>5 小时</b>是滚动窗口，用一点就涨一点，窗口起点 + 5 小时后整体回血；
+              <b>每周</b>是固定周期的总额度。<br><br>
+              额度是<b>账号级统一池子，不按模型分账</b>——5 小时打光时，3.8 Flash 会跟着一起没水，
+              只剩免费的 3.5 Flash-Lite 兜底。这就是为什么重模型要留余量。<br><br>
+              数据缓存 90 秒，因为每查一次都要打一次上游、占一个单 IP 请求额度。
+              查不到（cookie 失效等）会显示错误原因，不会静默显示 0%。
             </div>
           </details>
         </div>
@@ -2114,6 +2213,9 @@ const I18N_EN = {
   '最近 7 天': 'Last 7 days',
   '最近 30 天': 'Last 30 days',
   '距离封禁红线': 'Distance to ban threshold',
+  '账号额度': 'Account quota',
+  '这两个数字是怎么来的': 'Where these two numbers come from',
+  '还没有账号': 'No accounts yet',
   '刷新': 'Refresh',
   '还没有任何请求经过': 'No requests have passed through yet',
   '这条线是怎么来的': 'Where this line comes from',
